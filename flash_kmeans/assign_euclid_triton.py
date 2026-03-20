@@ -304,21 +304,15 @@ def _euclid_assign_kernel(
     )
     x_tile = tl.load(x_ptrs, mask=n_mask[:, None], other=0.0, eviction_policy='evict_first')
 
-    # Pre-load x_sq for the tile  (BLOCK_N,)
-    xsq_ptrs = x_sq_ptr + pid_b * stride_xsq_b + n_offsets * stride_xsq_n
-    x_sq_tile = tl.load(xsq_ptrs, mask=n_mask, other=0.0, eviction_policy='evict_first').to(tl.float32)
-
-    # Init best distance / index
-    best_dist = tl.full((BLOCK_N,), float('inf'), tl.float32)
+    # x_sq not needed in inner loop: argmin_k(x_sq + c_sq - 2*cross) = argmin_k(c_sq - 2*cross)
+    best_neg_score = tl.full((BLOCK_N,), float('inf'), tl.float32)
     best_idx = tl.zeros((BLOCK_N,), tl.int32)
 
-    # Iterate over centroids in chunks of BLOCK_K
     for k_start in range(0, K, BLOCK_K):
         k_offsets = k_start + tl.arange(0, BLOCK_K)
         k_offsets = k_offsets.to(tl.int64)
         k_mask = k_offsets < K
 
-        # Load centroid tile (D, BLOCK_K)
         c_ptrs = (
             c_ptr
             + pid_b * stride_c_b
@@ -327,24 +321,20 @@ def _euclid_assign_kernel(
         )
         c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0, eviction_policy='evict_last')
 
-        # Load precomputed c_sq (BLOCK_K,)
         csq_ptrs = c_sq_ptr + pid_b * stride_csq_b + k_offsets * stride_csq_k
         cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
 
-        # Cross term (BLOCK_N, BLOCK_K) = x_tile @ c_tile
         cross = tl.dot(x_tile, c_tile, out_dtype=tl.float32, max_num_imprecise_acc=D)
 
-        # Squared Euclidean distance
-        dist = x_sq_tile[:, None] + cent_sq[None, :] - 2.0 * cross
+        # c_sq - 2*cross gives same argmin as full distance (x_sq cancels)
+        neg_score = cent_sq[None, :] - 2.0 * cross
+        neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
 
-        # Mask invalid centroids
-        dist = tl.where(k_mask[None, :], dist, float('inf'))
+        curr_min = tl.min(neg_score, axis=1)
+        curr_idx = tl.argmin(neg_score, axis=1)
 
-        curr_min = tl.min(dist, axis=1)
-        curr_idx = tl.argmin(dist, axis=1)
-
-        update = curr_min < best_dist
-        best_dist = tl.where(update, curr_min, best_dist)
+        update = curr_min < best_neg_score
+        best_neg_score = tl.where(update, curr_min, best_neg_score)
         best_idx = tl.where(update, k_start + curr_idx, best_idx)
 
     # ------------------------------------------------------------------
