@@ -324,10 +324,10 @@ def _euclid_assign_kernel(
         csq_ptrs = c_sq_ptr + pid_b * stride_csq_b + k_offsets * stride_csq_k
         cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
 
-        cross = tl.dot(x_tile, c_tile, out_dtype=tl.float32, max_num_imprecise_acc=D)
+        cross = tl.dot(x_tile, c_tile, out_dtype=tl.float16, max_num_imprecise_acc=D)
 
         # c_sq - 2*cross gives same argmin as full distance (x_sq cancels)
-        neg_score = cent_sq[None, :] - 2.0 * cross
+        neg_score = cent_sq[None, :] - 2.0 * cross.to(tl.float32)
         neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
 
         curr_min = tl.min(neg_score, axis=1)
