@@ -58,7 +58,8 @@ _graph_cache = {}  # cache_key -> dict with graph and static tensors
 class _GraphEntry:
     __slots__ = ('call_count', 'graph', 'static_centroids', 'centroids_alt',
                  'final_centroids', 'static_out', 'static_x_sq', 'static_c_sq',
-                 'centroid_sums', 'centroid_cnts', 'sort_vals_buf', 'sort_idx_buf')
+                 'centroid_sums', 'centroid_cnts', 'sort_vals_buf', 'sort_idx_buf',
+                 'hist_buf', 'offsets_buf')
     def __init__(self):
         self.call_count = 0
         self.graph = None
@@ -66,7 +67,8 @@ class _GraphEntry:
 
 def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                      centroid_sums, centroid_cnts, cached_config, use_atomic,
-                     update_block_n, sort_vals_buf, sort_idx_buf, max_iters):
+                     update_block_n, sort_vals_buf, sort_idx_buf,
+                     hist_buf, offsets_buf, max_iters):
     """Run the Euclidean k-means loop with explicit ping-pong centroid buffers."""
     buf = [centroids_src, centroids_dst]
     for it in range(max_iters):
@@ -88,6 +90,8 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                                                   c_sq_out=c_sq,
                                                   sort_vals_buf=sort_vals_buf,
                                                   sort_idx_buf=sort_idx_buf,
+                                                  hist_buf=hist_buf,
+                                                  offsets_buf=offsets_buf,
                                                   centroids_out=dst)
     return out, buf[max_iters % 2]
 
@@ -167,8 +171,11 @@ def batch_kmeans_Euclid(
             if not use_atomic:
                 entry.sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
                 entry.sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
+                entry.hist_buf = torch.zeros((B, K), device=x.device, dtype=torch.int32)
+                entry.offsets_buf = torch.empty((B, K), device=x.device, dtype=torch.int32)
             else:
                 entry.sort_vals_buf = entry.sort_idx_buf = None
+                entry.hist_buf = entry.offsets_buf = None
 
             # Capture the graph
             g = torch.cuda.CUDAGraph()
@@ -182,6 +189,7 @@ def batch_kmeans_Euclid(
                     entry.centroid_sums, entry.centroid_cnts,
                     cached_config, use_atomic, update_block_n,
                     entry.sort_vals_buf, entry.sort_idx_buf,
+                    entry.hist_buf, entry.offsets_buf,
                     max_iters,
                 )
             entry.graph = g
@@ -215,8 +223,10 @@ def batch_kmeans_Euclid(
     if not use_atomic:
         sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
         sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
+        hist_buf = torch.zeros((B, n_clusters), device=x.device, dtype=torch.int32)
+        offsets_buf = torch.empty((B, n_clusters), device=x.device, dtype=torch.int32)
     else:
-        sort_vals_buf = sort_idx_buf = None
+        sort_vals_buf = sort_idx_buf = hist_buf = offsets_buf = None
 
     # First c_sq computation
     compute_sq_norms(centroids, out=c_sq)
@@ -237,7 +247,9 @@ def batch_kmeans_Euclid(
                                                                   centroid_cnts=centroid_cnts,
                                                                   c_sq_out=c_sq,
                                                                   sort_vals_buf=sort_vals_buf,
-                                                                  sort_idx_buf=sort_idx_buf)
+                                                                  sort_idx_buf=sort_idx_buf,
+                                                                  hist_buf=hist_buf,
+                                                                  offsets_buf=offsets_buf)
 
         if check_convergence or verbose:
             center_shift = (centroids_new - centroids).norm(dim=-1).max()

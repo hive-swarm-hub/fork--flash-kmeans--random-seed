@@ -171,6 +171,47 @@ def triton_centroid_update_euclid(x: torch.Tensor, cluster_ids: torch.Tensor, ol
     return centroids_out
 
 
+# ------------------------------ Counting sort kernels ------------------------------
+
+@triton.jit
+def _histogram_kernel(
+    cluster_ids_ptr, hist_ptr,
+    N: tl.constexpr, K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Compute histogram of cluster IDs using vectorized atomics."""
+    pid = tl.program_id(0)
+    pid_b = tl.program_id(1).to(tl.int64)
+    n_start = pid * BLOCK_N
+    n_offs = n_start + tl.arange(0, BLOCK_N)
+    n_mask = n_offs < N
+    cids = tl.load(cluster_ids_ptr + pid_b * N + n_offs, mask=n_mask, other=0)
+    hist_ptrs = hist_ptr + pid_b * K + cids
+    tl.atomic_add(hist_ptrs, tl.full((BLOCK_N,), 1, tl.int32), mask=n_mask)
+
+
+@triton.jit
+def _counting_scatter_kernel(
+    cluster_ids_ptr, offsets_ptr, sorted_vals_ptr, sorted_idx_ptr,
+    N: tl.constexpr, K: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    """Scatter points to sorted positions using atomic offset increments."""
+    pid = tl.program_id(0)
+    pid_b = tl.program_id(1).to(tl.int64)
+    n_start = pid * BLOCK_N
+    n_offs = (n_start + tl.arange(0, BLOCK_N)).to(tl.int64)
+    n_mask = n_offs < N
+    cids = tl.load(cluster_ids_ptr + pid_b * N + n_offs, mask=n_mask, other=0)
+    offset_ptrs = offsets_ptr + pid_b * K + cids
+    positions = tl.atomic_add(offset_ptrs, tl.full((BLOCK_N,), 1, tl.int32), mask=n_mask)
+    positions = positions.to(tl.int64)
+    out_vals_ptrs = sorted_vals_ptr + pid_b * N + positions
+    out_idx_ptrs = sorted_idx_ptr + pid_b * N + positions
+    tl.store(out_vals_ptrs, cids.to(tl.int16), mask=n_mask)
+    tl.store(out_idx_ptrs, n_offs, mask=n_mask)
+
+
 # ------------------------------ NEW: chunk-wise centroid update (sorted ids) ------------------------------
 
 @triton.jit
@@ -297,6 +338,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
                                          *, BLOCK_N: int = 128, centroid_sums: torch.Tensor = None, centroid_cnts: torch.Tensor = None, calculate_new: bool = True,
                                          c_sq_out: torch.Tensor = None,
                                          sort_vals_buf: torch.Tensor = None, sort_idx_buf: torch.Tensor = None,
+                                         hist_buf: torch.Tensor = None, offsets_buf: torch.Tensor = None,
                                          centroids_out: torch.Tensor = None):
     """Fast centroid update for *Euclidean* KMeans assuming cluster IDs are pre-sorted.
 
@@ -326,17 +368,28 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
     B, N, D = x.shape
     K = old_centroids.shape[1]
 
-    # Batch-wise sort of cluster assignments using int16 for faster radix sort
-    # (K < 32768 guaranteed by benchmark constraints)
-    if cluster_ids.dtype != torch.int16:
-        ids_to_sort = cluster_ids.to(torch.int16)
+    # Counting sort: histogram + prefix sum + scatter (faster than radix sort)
+    SORT_BN = 128
+    sort_grid = (triton.cdiv(N, SORT_BN), B)
+    if hist_buf is None:
+        hist_buf = torch.zeros((B, K), device=x.device, dtype=torch.int32)
     else:
-        ids_to_sort = cluster_ids
-    if sort_vals_buf is not None and sort_idx_buf is not None:
-        torch.sort(ids_to_sort, dim=-1, stable=False, out=(sort_vals_buf, sort_idx_buf))
-        sorted_cluster_ids, sorted_idx = sort_vals_buf, sort_idx_buf
+        hist_buf.zero_()
+    _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=1)
+    if offsets_buf is None:
+        offsets_buf = torch.cumsum(hist_buf, dim=1) - hist_buf
     else:
-        sorted_cluster_ids, sorted_idx = torch.sort(ids_to_sort, dim=-1, stable=False)
+        torch.cumsum(hist_buf, dim=1, out=offsets_buf)
+        offsets_buf -= hist_buf
+    if sort_vals_buf is None:
+        sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
+    if sort_idx_buf is None:
+        sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
+    _counting_scatter_kernel[sort_grid](
+        cluster_ids, offsets_buf, sort_vals_buf, sort_idx_buf,
+        N=N, K=K, BLOCK_N=SORT_BN, num_warps=1,
+    )
+    sorted_cluster_ids, sorted_idx = sort_vals_buf, sort_idx_buf
 
     if centroid_sums is None:
         centroid_sums = torch.zeros((B, K, D), device=x.device, dtype=torch.float32)
