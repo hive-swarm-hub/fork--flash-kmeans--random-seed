@@ -69,7 +69,6 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                      update_block_n, sort_vals_buf, sort_idx_buf, max_iters):
     """Run the Euclidean k-means loop with explicit ping-pong centroid buffers."""
     buf = [centroids_src, centroids_dst]
-    compute_sq_norms(buf[0], out=c_sq)
     for it in range(max_iters):
         src = buf[it % 2]
         dst = buf[(it + 1) % 2]
@@ -138,8 +137,9 @@ def batch_kmeans_Euclid(
         entry.call_count += 1
 
         if entry.graph is not None:
-            # Replay: copy new init_centroids, skip x_sq recompute (cached in graph)
+            # Replay: copy new init_centroids, compute c_sq, then replay
             entry.static_centroids.copy_(centroids, non_blocking=True)
+            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             entry.graph.replay()
             return entry.static_out, entry.final_centroids, max_iters
 
@@ -173,6 +173,7 @@ def batch_kmeans_Euclid(
             # Capture the graph
             g = torch.cuda.CUDAGraph()
             entry.static_centroids.copy_(centroids, non_blocking=True)
+            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             with torch.cuda.graph(g):
                 _, final_buf = _run_euclid_loop(
                     x, entry.static_x_sq,
@@ -188,6 +189,7 @@ def batch_kmeans_Euclid(
 
             # Also replay once to get correct outputs
             entry.static_centroids.copy_(centroids, non_blocking=True)
+            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             entry.graph.replay()
             return entry.static_out, entry.final_centroids, max_iters
 
