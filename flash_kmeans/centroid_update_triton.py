@@ -349,11 +349,10 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         centroid_cnts.zero_()
 
     grid = (triton.cdiv(N, BLOCK_N), B)
-    sorted_cids = sorted_cluster_ids if sorted_cluster_ids.dtype == torch.int32 else sorted_cluster_ids.to(torch.int32)
     _centroid_update_chunk_kernel[grid](
         x,                       # original features
         sorted_idx,          # gather indices
-        sorted_cids,
+        sorted_cluster_ids,  # int16 directly (Triton promotes)
         centroid_sums,
         centroid_cnts,
         x.stride(0), x.stride(1), x.stride(2),
