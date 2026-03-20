@@ -276,6 +276,7 @@ def _euclid_assign_kernel(
     stride_out_n: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
+    K_ALIGNED: tl.constexpr = False,
 ):
     """Each program handles a tile of BLOCK_N points for a given batch element.
 
@@ -312,7 +313,6 @@ def _euclid_assign_kernel(
     for k_start in range(0, K, BLOCK_K):
         k_offsets = k_start + tl.arange(0, BLOCK_K)
         k_offsets = k_offsets.to(tl.int64)
-        k_mask = k_offsets < K
 
         c_ptrs = (
             c_ptr
@@ -320,16 +320,22 @@ def _euclid_assign_kernel(
             + k_offsets[None, :] * stride_c_k
             + offs_d[:, None] * stride_c_d
         )
-        c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0, eviction_policy='evict_last')
-
         csq_ptrs = c_sq_ptr + pid_b * stride_csq_b + k_offsets * stride_csq_k
-        cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
+
+        if K_ALIGNED:
+            c_tile = tl.load(c_ptrs, eviction_policy='evict_last')
+            cent_sq = tl.load(csq_ptrs).to(tl.float32)
+        else:
+            k_mask = k_offsets < K
+            c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0, eviction_policy='evict_last')
+            cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
 
         cross = tl.dot(x_tile, c_tile, out_dtype=tl.float16, max_num_imprecise_acc=D)
 
         # c_sq - 2*cross gives same argmin as full distance (x_sq cancels)
         neg_score = cent_sq[None, :] - 2.0 * cross.to(tl.float32)
-        neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
+        if not K_ALIGNED:
+            neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
 
         # Fused min+argmin in single reduction pass
         tile_indices = (tl.arange(0, BLOCK_K) + k_start).to(tl.int32)
@@ -507,6 +513,7 @@ def euclid_assign_triton(
         selected_config = _heuristic_euclid_config(N, K, D, device=x.device)
 
     if selected_config is not None:
+        k_aligned = (K % selected_config["BLOCK_K"] == 0)
         _euclid_assign_kernel[grid](
             x,
             centroids,
@@ -531,6 +538,7 @@ def euclid_assign_triton(
             stride_out_n,
             BLOCK_N=selected_config["BLOCK_N"],
             BLOCK_K=selected_config["BLOCK_K"],
+            K_ALIGNED=k_aligned,
             num_warps=selected_config["num_warps"],
             num_stages=selected_config["num_stages"],
         )

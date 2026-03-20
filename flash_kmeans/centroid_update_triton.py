@@ -328,7 +328,10 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
 
     # Batch-wise sort of cluster assignments using int16 for faster radix sort
     # (K < 32768 guaranteed by benchmark constraints)
-    ids_to_sort = cluster_ids if cluster_ids.dtype == torch.int16 else cluster_ids.to(torch.int16)
+    if cluster_ids.dtype != torch.int16:
+        ids_to_sort = cluster_ids.to(torch.int16)
+    else:
+        ids_to_sort = cluster_ids
     if sort_vals_buf is not None and sort_idx_buf is not None:
         torch.sort(ids_to_sort, dim=-1, stable=False, out=(sort_vals_buf, sort_idx_buf))
         sorted_cluster_ids, sorted_idx = sort_vals_buf, sort_idx_buf
