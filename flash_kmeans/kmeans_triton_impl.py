@@ -150,7 +150,7 @@ def batch_kmeans_Euclid(
         else:
             # Second call: capture CUDA graph
             K = n_clusters
-            use_atomic = K <= 256
+            use_atomic = False  # sorted path faster even for small K
             update_block_n = 128
 
             # Allocate static buffers
