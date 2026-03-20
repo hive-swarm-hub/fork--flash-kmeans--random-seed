@@ -363,7 +363,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         centroid_cnts.stride(0), centroid_cnts.stride(1),
         B, N, D, K,
         BLOCK_N=BLOCK_N,
-        num_warps=4,
+        num_warps=2,
     )
 
     if calculate_new:
