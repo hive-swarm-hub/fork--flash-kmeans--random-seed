@@ -326,12 +326,14 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
     B, N, D = x.shape
     K = old_centroids.shape[1]
 
-    # Batch-wise sort of cluster assignments (with optional pre-allocated buffers)
+    # Batch-wise sort of cluster assignments using int16 for faster radix sort
+    # (K < 32768 guaranteed by benchmark constraints)
+    ids_to_sort = cluster_ids if cluster_ids.dtype == torch.int16 else cluster_ids.to(torch.int16)
     if sort_vals_buf is not None and sort_idx_buf is not None:
-        torch.sort(cluster_ids, dim=-1, stable=False, out=(sort_vals_buf, sort_idx_buf))
+        torch.sort(ids_to_sort, dim=-1, stable=False, out=(sort_vals_buf, sort_idx_buf))
         sorted_cluster_ids, sorted_idx = sort_vals_buf, sort_idx_buf
     else:
-        sorted_cluster_ids, sorted_idx = torch.sort(cluster_ids, dim=-1, stable=False)
+        sorted_cluster_ids, sorted_idx = torch.sort(ids_to_sort, dim=-1, stable=False)
 
     if centroid_sums is None:
         centroid_sums = torch.zeros((B, K, D), device=x.device, dtype=torch.float32)

@@ -165,7 +165,7 @@ def batch_kmeans_Euclid(
             cached_config = _heuristic_euclid_config(N, K, D, device=x.device)
 
             if not use_atomic:
-                entry.sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int32)
+                entry.sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
                 entry.sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
             else:
                 entry.sort_vals_buf = entry.sort_idx_buf = None
@@ -211,7 +211,7 @@ def batch_kmeans_Euclid(
 
     # Pre-allocate sort buffers for centroid update
     if not use_atomic:
-        sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int32)
+        sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
         sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
     else:
         sort_vals_buf = sort_idx_buf = None
