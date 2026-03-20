@@ -251,6 +251,11 @@ def _heuristic_euclid_config(
 
 
 @triton.jit
+def _min_argmin_combine(val_a, idx_a, val_b, idx_b):
+    use_a = val_a <= val_b
+    return tl.where(use_a, val_a, val_b), tl.where(use_a, idx_a, idx_b)
+
+@triton.jit
 def _euclid_assign_kernel(
     x_ptr,                 # *f16 / *f32 [B, N, D]
     c_ptr,                 # *f16 / *f32 [B, K, D]
@@ -330,12 +335,14 @@ def _euclid_assign_kernel(
         neg_score = cent_sq[None, :] - 2.0 * cross.to(tl.float32)
         neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
 
-        curr_min = tl.min(neg_score, axis=1)
-        curr_idx = tl.argmin(neg_score, axis=1)
+        # Fused min+argmin in single reduction pass
+        tile_indices = (tl.arange(0, BLOCK_K) + k_start).to(tl.int32)
+        tile_indices_2d = tl.broadcast_to(tile_indices[None, :], (BLOCK_N, BLOCK_K))
+        curr_min, curr_abs_idx = tl.reduce((neg_score, tile_indices_2d), axis=1, combine_fn=_min_argmin_combine)
 
         update = curr_min < best_neg_score
         best_neg_score = tl.where(update, curr_min, best_neg_score)
-        best_idx = tl.where(update, k_start + curr_idx, best_idx)
+        best_idx = tl.where(update, curr_abs_idx, best_idx)
 
     # ------------------------------------------------------------------
     # Write results
