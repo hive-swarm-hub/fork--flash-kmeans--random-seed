@@ -403,10 +403,11 @@ def _finalize_centroids_kernel(
     if count > 0:
         count_f = count.to(tl.float32)
         sums = tl.load(sums_ptr + pid_b * stride_s_b + k_idx * stride_s_k + offs_d * stride_s_d)
-        result = (sums / count_f).to(tl.float16)
+        result_fp32 = sums / count_f
+        result = result_fp32.to(tl.float16)
         tl.store(out_ptr + pid_b * stride_out_b + k_idx * stride_out_k + offs_d * stride_out_d, result)
         if COMPUTE_CSQ:
-            sq_norm = tl.sum(result.to(tl.float32) * result.to(tl.float32))
+            sq_norm = tl.sum(result_fp32 * result_fp32)
             tl.store(csq_ptr + pid_b * stride_csq_b + k_idx * stride_csq_k, sq_norm.to(tl.float16))
     else:
         old_vals = tl.load(old_ptr + pid_b * stride_o_b + k_idx * stride_o_k + offs_d * stride_o_d)
