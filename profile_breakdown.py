@@ -30,12 +30,12 @@ for wl in WORKLOADS:
     out = torch.empty(B, N, device="cuda", dtype=torch.int32)
     centroid_sums = torch.zeros(B, K, D, device="cuda", dtype=torch.float32)
     centroid_cnts = torch.zeros(B, K, device="cuda", dtype=torch.int32)
-    sort_vals = torch.empty(B, N, device="cuda", dtype=torch.int32)
+    sort_vals = torch.empty(B, N, device="cuda", dtype=torch.int16)
     sort_idx = torch.empty(B, N, device="cuda", dtype=torch.int64)
     centroids_out = torch.empty_like(centroids)
 
     cached_config = _heuristic_euclid_config(N, K, D, device=x.device)
-    update_block_n = 64 if B >= 16 and K >= 2048 else 128
+    update_block_n = 32
 
     # Warmup
     for _ in range(NUM_WARMUP):
@@ -60,11 +60,12 @@ for wl in WORKLOADS:
     e.record(); torch.cuda.synchronize()
     assign_ms = s.elapsed_time(e) / NUM_TIMED
 
-    # Time sort alone
+    # Time sort alone (int16)
     cluster_ids = out
+    cluster_ids_i16 = cluster_ids.to(torch.int16)
     s.record()
     for _ in range(NUM_TIMED):
-        torch.sort(cluster_ids, dim=-1, stable=False, out=(sort_vals, sort_idx))
+        torch.sort(cluster_ids_i16, dim=-1, stable=False, out=(sort_vals, sort_idx))
     e.record(); torch.cuda.synchronize()
     sort_ms = s.elapsed_time(e) / NUM_TIMED
 
