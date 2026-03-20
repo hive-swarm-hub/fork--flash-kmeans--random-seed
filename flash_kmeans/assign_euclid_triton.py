@@ -304,7 +304,7 @@ def _euclid_assign_kernel(
         + n_offsets[:, None] * stride_x_n
         + offs_d[None, :] * stride_x_d
     )
-    x_tile = tl.load(x_ptrs, mask=n_mask[:, None], other=0.0, eviction_policy='evict_first')
+    x_tile = tl.load(x_ptrs, mask=n_mask[:, None], other=0.0)
 
     # x_sq not needed in inner loop: argmin_k(x_sq + c_sq - 2*cross) = argmin_k(c_sq - 2*cross)
     best_neg_score = tl.full((BLOCK_N,), float('inf'), tl.float32)
@@ -323,11 +323,11 @@ def _euclid_assign_kernel(
         csq_ptrs = c_sq_ptr + pid_b * stride_csq_b + k_offsets * stride_csq_k
 
         if K_ALIGNED:
-            c_tile = tl.load(c_ptrs, eviction_policy='evict_last')
+            c_tile = tl.load(c_ptrs)
             cent_sq = tl.load(csq_ptrs).to(tl.float32)
         else:
             k_mask = k_offsets < K
-            c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0, eviction_policy='evict_last')
+            c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0)
             cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
 
         cross = tl.dot(x_tile, c_tile, out_dtype=tl.float16, max_num_imprecise_acc=D)
