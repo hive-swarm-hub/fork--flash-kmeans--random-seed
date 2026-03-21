@@ -159,7 +159,7 @@ def triton_centroid_update_euclid(x: torch.Tensor, cluster_ids: torch.Tensor, ol
     if not compute_csq:
         c_sq_out = old_centroids.new_empty(0)
     _finalize_centroids_kernel[(K, B)](
-        centroid_sums, centroid_counts, old_centroids, centroids_out, c_sq_out,
+        centroid_sums, centroid_counts, old_centroids, centroids_out, c_sq_out, old_centroids,
         centroid_sums.stride(0), centroid_sums.stride(1), centroid_sums.stride(2),
         centroid_counts.stride(0), centroid_counts.stride(1),
         old_centroids.stride(0), old_centroids.stride(1), old_centroids.stride(2),
@@ -437,15 +437,16 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         compute_csq = c_sq_out is not None
         if not compute_csq:
             c_sq_out = old_centroids.new_empty(0)
+        zero_hist = skip_histogram  # If histogram was fused into assign, zero it in finalize
         _finalize_centroids_kernel[(K, B)](
-            centroid_sums, centroid_cnts, old_centroids, centroids_out, c_sq_out,
+            centroid_sums, centroid_cnts, old_centroids, centroids_out, c_sq_out, hist_buf,
             centroid_sums.stride(0), centroid_sums.stride(1), centroid_sums.stride(2),
             centroid_cnts.stride(0), centroid_cnts.stride(1),
             old_centroids.stride(0), old_centroids.stride(1), old_centroids.stride(2),
             centroids_out.stride(0), centroids_out.stride(1), centroids_out.stride(2),
             K if not compute_csq else c_sq_out.stride(0),
             1 if not compute_csq else c_sq_out.stride(1),
-            K=K, D=D, COMPUTE_CSQ=compute_csq, ZERO_BUFFERS=True,
+            K=K, D=D, COMPUTE_CSQ=compute_csq, ZERO_BUFFERS=True, ZERO_HIST=zero_hist,
             num_warps=1,
         )
         return centroids_out
@@ -453,7 +454,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         return None
 @triton.jit
 def _finalize_centroids_kernel(
-    sums_ptr, counts_ptr, old_ptr, out_ptr, csq_ptr,
+    sums_ptr, counts_ptr, old_ptr, out_ptr, csq_ptr, hist_ptr,
     stride_s_b, stride_s_k, stride_s_d,
     stride_c_b, stride_c_k,
     stride_o_b, stride_o_k, stride_o_d,
@@ -462,6 +463,7 @@ def _finalize_centroids_kernel(
     K: tl.constexpr, D: tl.constexpr,
     COMPUTE_CSQ: tl.constexpr = False,
     ZERO_BUFFERS: tl.constexpr = False,
+    ZERO_HIST: tl.constexpr = False,
 ):
     """Fused centroid finalization: divide sums by counts, handle empty clusters, optionally compute c_sq and zero buffers."""
     pid_k = tl.program_id(0)
@@ -492,6 +494,8 @@ def _finalize_centroids_kernel(
         tl.store(sums_ptr + pid_b * stride_s_b + k_idx * stride_s_k + offs_d * stride_s_d,
                  tl.zeros((D,), tl.float32))
         tl.store(counts_ptr + pid_b * stride_c_b + k_idx * stride_c_k, 0)
+    if ZERO_HIST:
+        tl.store(hist_ptr + pid_b * K + k_idx, 0)
 
 
 def torch_centroid_update_euclid(x: torch.Tensor, cluster_ids: torch.Tensor, old_centroids: torch.Tensor,
