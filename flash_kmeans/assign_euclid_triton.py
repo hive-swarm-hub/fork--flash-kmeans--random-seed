@@ -57,6 +57,7 @@ def compute_sq_norms(x, out=None):
         x.stride(0), x.stride(1), x.stride(2),
         out.stride(0), out.stride(1),
         N=N, D=D, BLOCK_N=BLOCK_N,
+        num_warps=1,
     )
     return out
 
