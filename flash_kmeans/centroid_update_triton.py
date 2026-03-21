@@ -429,6 +429,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
             K if not compute_csq else c_sq_out.stride(0),
             1 if not compute_csq else c_sq_out.stride(1),
             K=K, D=D, COMPUTE_CSQ=compute_csq, ZERO_BUFFERS=True,
+            num_warps=1,
         )
         return centroids_out
     else:
