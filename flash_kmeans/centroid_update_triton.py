@@ -369,7 +369,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
     K = old_centroids.shape[1]
 
     # Counting sort: histogram + prefix sum + scatter (faster than radix sort)
-    SORT_BN = 128
+    SORT_BN = 256
     sort_grid = (triton.cdiv(N, SORT_BN), B)
     if hist_buf is None:
         hist_buf = torch.zeros((B, K), device=x.device, dtype=torch.int32)
