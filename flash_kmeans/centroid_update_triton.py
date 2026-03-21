@@ -191,6 +191,21 @@ def _histogram_kernel(
 
 
 @triton.jit
+def _exclusive_prefix_sum_kernel(
+    hist_ptr, offsets_ptr,
+    K: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    """Fused exclusive prefix sum: replaces cumsum + subtract with single kernel."""
+    pid_b = tl.program_id(0).to(tl.int64)
+    offs = tl.arange(0, BLOCK_K)
+    mask = offs < K
+    hist = tl.load(hist_ptr + pid_b * K + offs, mask=mask, other=0)
+    inclusive = tl.cumsum(hist, axis=0)
+    exclusive = inclusive - hist
+    tl.store(offsets_ptr + pid_b * K + offs, exclusive, mask=mask)
+
+
+@triton.jit
 def _counting_scatter_kernel(
     cluster_ids_ptr, offsets_ptr, sorted_vals_ptr, sorted_idx_ptr,
     N: tl.constexpr, K: tl.constexpr,
@@ -377,10 +392,10 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         hist_buf.zero_()
     _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=2)
     if offsets_buf is None:
-        offsets_buf = torch.cumsum(hist_buf, dim=1) - hist_buf
-    else:
-        torch.cumsum(hist_buf, dim=1, out=offsets_buf)
-        offsets_buf -= hist_buf
+        offsets_buf = torch.empty((B, K), device=x.device, dtype=torch.int32)
+    # Fused exclusive prefix sum (single kernel instead of cumsum + subtract)
+    BLOCK_K = triton.next_power_of_2(K)
+    _exclusive_prefix_sum_kernel[(B,)](hist_buf, offsets_buf, K=K, BLOCK_K=BLOCK_K)
     if sort_vals_buf is None:
         sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
     if sort_idx_buf is None:
