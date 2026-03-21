@@ -375,7 +375,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         hist_buf = torch.zeros((B, K), device=x.device, dtype=torch.int32)
     else:
         hist_buf.zero_()
-    _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=1)
+    _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=2)
     if offsets_buf is None:
         offsets_buf = torch.cumsum(hist_buf, dim=1) - hist_buf
     else:
@@ -387,7 +387,7 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
         sort_idx_buf = torch.empty((B, N), device=x.device, dtype=torch.int64)
     _counting_scatter_kernel[sort_grid](
         cluster_ids, offsets_buf, sort_vals_buf, sort_idx_buf,
-        N=N, K=K, BLOCK_N=SORT_BN, num_warps=1,
+        N=N, K=K, BLOCK_N=SORT_BN, num_warps=2,
     )
     sorted_cluster_ids, sorted_idx = sort_vals_buf, sort_idx_buf
 
