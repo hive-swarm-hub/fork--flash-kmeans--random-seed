@@ -154,7 +154,7 @@ def batch_kmeans_Euclid(
             # Second call: capture CUDA graph
             K = n_clusters
             use_atomic = False  # sorted path faster even for small K
-            update_block_n = 32
+            update_block_n = 64 if D >= 256 else 32
 
             # Allocate static buffers
             entry.static_centroids = centroids.clone()
@@ -215,7 +215,7 @@ def batch_kmeans_Euclid(
     cached_config = _heuristic_euclid_config(N, n_clusters, D, device=x.device) if use_heuristic else None
 
     use_atomic = False  # sorted path is faster even for small K
-    update_block_n = 32
+    update_block_n = 64 if D >= 256 else 32
 
     # Pre-allocate sort buffers for centroid update
     if not use_atomic:
