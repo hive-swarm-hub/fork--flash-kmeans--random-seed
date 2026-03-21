@@ -233,8 +233,10 @@ def batch_kmeans_Euclid(
     compute_sq_norms(centroids, out=c_sq)
 
     for it in range(max_iters):
+        # Use fused assign+histogram to warm up the hist kernel for graph capture
         cluster_ids = euclid_assign_triton(x, centroids, x_sq, out=out, c_sq=c_sq,
-                                           config=cached_config, use_heuristic=False)
+                                           config=cached_config, use_heuristic=False,
+                                           hist_buf=hist_buf)
         # Centroid update + fused c_sq for next iteration
         if use_atomic:
             centroids_new = triton_centroid_update_euclid(x, cluster_ids, centroids,
@@ -250,7 +252,8 @@ def batch_kmeans_Euclid(
                                                                   sort_vals_buf=sort_vals_buf,
                                                                   sort_idx_buf=sort_idx_buf,
                                                                   hist_buf=hist_buf,
-                                                                  offsets_buf=offsets_buf)
+                                                                  offsets_buf=offsets_buf,
+                                                                  skip_histogram=True)
 
         if check_convergence or verbose:
             center_shift = (centroids_new - centroids).norm(dim=-1).max()
