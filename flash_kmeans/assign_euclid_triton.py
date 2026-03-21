@@ -347,6 +347,56 @@ def _euclid_assign_kernel(
     out_ptrs = out_ptr + pid_b * stride_out_b + n_offsets * stride_out_n
     tl.store(out_ptrs, best_idx, mask=n_mask)
 
+
+@triton.jit
+def _euclid_assign_hist_kernel(
+    x_ptr, c_ptr, x_sq_ptr, c_sq_ptr, out_ptr, hist_ptr,
+    B: tl.constexpr, N: tl.constexpr, K: tl.constexpr, D: tl.constexpr,
+    stride_x_b: tl.constexpr, stride_x_n: tl.constexpr, stride_x_d: tl.constexpr,
+    stride_c_b: tl.constexpr, stride_c_k: tl.constexpr, stride_c_d: tl.constexpr,
+    stride_xsq_b: tl.constexpr, stride_xsq_n: tl.constexpr,
+    stride_csq_b: tl.constexpr, stride_csq_k: tl.constexpr,
+    stride_out_b: tl.constexpr, stride_out_n: tl.constexpr,
+    BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
+):
+    """Assignment kernel with fused histogram update."""
+    pid_n = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_b = pid_b.to(tl.int64)
+    n_start = pid_n * BLOCK_N
+    n_offsets = n_start + tl.arange(0, BLOCK_N)
+    n_offsets = n_offsets.to(tl.int64)
+    n_mask = n_offsets < N
+    offs_d = tl.arange(0, D).to(tl.int64)
+    x_ptrs = x_ptr + pid_b * stride_x_b + n_offsets[:, None] * stride_x_n + offs_d[None, :] * stride_x_d
+    x_tile = tl.load(x_ptrs, mask=n_mask[:, None], other=0.0)
+    best_neg_score = tl.full((BLOCK_N,), float('inf'), tl.float32)
+    best_idx = tl.zeros((BLOCK_N,), tl.int32)
+    for k_start in range(0, K, BLOCK_K):
+        k_offsets = k_start + tl.arange(0, BLOCK_K)
+        k_offsets = k_offsets.to(tl.int64)
+        c_ptrs = c_ptr + pid_b * stride_c_b + k_offsets[None, :] * stride_c_k + offs_d[:, None] * stride_c_d
+        csq_ptrs = c_sq_ptr + pid_b * stride_csq_b + k_offsets * stride_csq_k
+        k_mask = k_offsets < K
+        c_tile = tl.load(c_ptrs, mask=k_mask[None, :], other=0.0)
+        cent_sq = tl.load(csq_ptrs, mask=k_mask, other=0.0).to(tl.float32)
+        cross = tl.dot(x_tile, c_tile, out_dtype=tl.float16, max_num_imprecise_acc=D)
+        neg_score = cent_sq[None, :] - 2.0 * cross.to(tl.float32)
+        neg_score = tl.where(k_mask[None, :], neg_score, float('inf'))
+        tile_indices = (tl.arange(0, BLOCK_K) + k_start).to(tl.int32)
+        tile_indices_2d = tl.broadcast_to(tile_indices[None, :], (BLOCK_N, BLOCK_K))
+        curr_min, curr_abs_idx = tl.reduce((neg_score, tile_indices_2d), axis=1, combine_fn=_min_argmin_combine)
+        update = curr_min < best_neg_score
+        best_neg_score = tl.where(update, curr_min, best_neg_score)
+        best_idx = tl.where(update, curr_abs_idx, best_idx)
+    # Write cluster IDs
+    out_ptrs = out_ptr + pid_b * stride_out_b + n_offsets * stride_out_n
+    tl.store(out_ptrs, best_idx, mask=n_mask)
+    # Fused histogram: vectorized atomic add
+    hist_ptrs = hist_ptr + pid_b * K + best_idx.to(tl.int64)
+    tl.atomic_add(hist_ptrs, tl.full((BLOCK_N,), 1, tl.int32), mask=n_mask)
+
+
 _euclid_assign_kernel_autotuned = triton.autotune(_TUNE_CONFIGS, key=["N", "K"])(_euclid_assign_kernel)
 
 @triton.jit
@@ -459,6 +509,7 @@ def euclid_assign_triton(
     num_stages: Optional[int] = None,
     config: Optional[dict] = None,
     use_heuristic: bool = True,
+    hist_buf: torch.Tensor = None,
 ) -> torch.Tensor:
     """Return nearest-centroid indices using Triton kernel.
 
@@ -508,33 +559,35 @@ def euclid_assign_triton(
         selected_config = _heuristic_euclid_config(N, K, D, device=x.device)
 
     if selected_config is not None:
-        _euclid_assign_kernel[grid](
-            x,
-            centroids,
-            x_sq,
-            c_sq,
-            out,
-            B,
-            N,
-            K,
-            D,
-            stride_x_b,
-            stride_x_n,
-            stride_x_d,
-            stride_c_b,
-            stride_c_k,
-            stride_c_d,
-            stride_xsq_b,
-            stride_xsq_n,
-            stride_csq_b,
-            stride_csq_k,
-            stride_out_b,
-            stride_out_n,
-            BLOCK_N=selected_config["BLOCK_N"],
-            BLOCK_K=selected_config["BLOCK_K"],
-            num_warps=selected_config["num_warps"],
-            num_stages=selected_config["num_stages"],
-        )
+        if hist_buf is not None:
+            # Use fused assign+histogram kernel
+            _euclid_assign_hist_kernel[grid](
+                x, centroids, x_sq, c_sq, out, hist_buf,
+                B, N, K, D,
+                stride_x_b, stride_x_n, stride_x_d,
+                stride_c_b, stride_c_k, stride_c_d,
+                stride_xsq_b, stride_xsq_n,
+                stride_csq_b, stride_csq_k,
+                stride_out_b, stride_out_n,
+                BLOCK_N=selected_config["BLOCK_N"],
+                BLOCK_K=selected_config["BLOCK_K"],
+                num_warps=selected_config["num_warps"],
+                num_stages=selected_config["num_stages"],
+            )
+        else:
+            _euclid_assign_kernel[grid](
+                x, centroids, x_sq, c_sq, out,
+                B, N, K, D,
+                stride_x_b, stride_x_n, stride_x_d,
+                stride_c_b, stride_c_k, stride_c_d,
+                stride_xsq_b, stride_xsq_n,
+                stride_csq_b, stride_csq_k,
+                stride_out_b, stride_out_n,
+                BLOCK_N=selected_config["BLOCK_N"],
+                BLOCK_K=selected_config["BLOCK_K"],
+                num_warps=selected_config["num_warps"],
+                num_stages=selected_config["num_stages"],
+            )
     else:
         _euclid_assign_kernel_autotuned[grid](
             x,

@@ -354,7 +354,8 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
                                          c_sq_out: torch.Tensor = None,
                                          sort_vals_buf: torch.Tensor = None, sort_idx_buf: torch.Tensor = None,
                                          hist_buf: torch.Tensor = None, offsets_buf: torch.Tensor = None,
-                                         centroids_out: torch.Tensor = None):
+                                         centroids_out: torch.Tensor = None,
+                                         skip_histogram: bool = False):
     """Fast centroid update for *Euclidean* KMeans assuming cluster IDs are pre-sorted.
 
     Parameters
@@ -388,9 +389,10 @@ def triton_centroid_update_sorted_euclid(x: torch.Tensor, cluster_ids: torch.Ten
     sort_grid = (triton.cdiv(N, SORT_BN), B)
     if hist_buf is None:
         hist_buf = torch.zeros((B, K), device=x.device, dtype=torch.int32)
-    else:
+    elif not skip_histogram:
         hist_buf.zero_()
-    _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=2)
+    if not skip_histogram:
+        _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=2)
     if offsets_buf is None:
         offsets_buf = torch.empty((B, K), device=x.device, dtype=torch.int32)
     # Fused exclusive prefix sum (single kernel instead of cumsum + subtract)

@@ -74,8 +74,11 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
     for it in range(max_iters):
         src = buf[it % 2]
         dst = buf[(it + 1) % 2]
+        # Fused assign + histogram: zero hist, then assign kernel writes histogram atomically
+        hist_buf.zero_()
         cluster_ids = euclid_assign_triton(x, src, x_sq, out=out, c_sq=c_sq,
-                                           config=cached_config, use_heuristic=False)
+                                           config=cached_config, use_heuristic=False,
+                                           hist_buf=hist_buf)
         if use_atomic:
             triton_centroid_update_euclid(x, cluster_ids, src,
                                           centroid_sums=centroid_sums,
@@ -92,7 +95,8 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                                                   sort_idx_buf=sort_idx_buf,
                                                   hist_buf=hist_buf,
                                                   offsets_buf=offsets_buf,
-                                                  centroids_out=dst)
+                                                  centroids_out=dst,
+                                                  skip_histogram=True)
     return out, buf[max_iters % 2]
 
 
