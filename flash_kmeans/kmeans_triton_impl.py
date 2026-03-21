@@ -141,9 +141,8 @@ def batch_kmeans_Euclid(
         entry.call_count += 1
 
         if entry.graph is not None:
-            # Replay: copy new init_centroids, compute c_sq, then replay
+            # Replay: copy new init_centroids then replay (c_sq computed inside graph)
             entry.static_centroids.copy_(centroids, non_blocking=True)
-            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             entry.graph.replay()
             return entry.static_out, entry.final_centroids, max_iters
 
@@ -177,11 +176,11 @@ def batch_kmeans_Euclid(
                 entry.sort_vals_buf = entry.sort_idx_buf = None
                 entry.hist_buf = entry.offsets_buf = None
 
-            # Capture the graph
+            # Capture the graph (include compute_sq_norms inside graph to reduce launch overhead)
             g = torch.cuda.CUDAGraph()
             entry.static_centroids.copy_(centroids, non_blocking=True)
-            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             with torch.cuda.graph(g):
+                compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
                 _, final_buf = _run_euclid_loop(
                     x, entry.static_x_sq,
                     entry.static_centroids, entry.centroids_alt,
@@ -197,7 +196,6 @@ def batch_kmeans_Euclid(
 
             # Also replay once to get correct outputs
             entry.static_centroids.copy_(centroids, non_blocking=True)
-            compute_sq_norms(entry.static_centroids, out=entry.static_c_sq)
             entry.graph.replay()
             return entry.static_out, entry.final_centroids, max_iters
 
