@@ -180,7 +180,7 @@ def batch_kmeans_Euclid(
             # Graduated dim schedule: D32 early → D64 middle → D128 final
             if D == 128 and K >= 4096:
                 dim_schedule = [16]*2 + [32]*4 + [64]*3 + [128]
-            elif D == 128:
+            elif D == 128 and K >= 256:
                 dim_schedule = [32]*5 + [64]*4 + [128]
             elif D == 256:
                 dim_schedule = [64]*7 + [128]*2 + [256]
