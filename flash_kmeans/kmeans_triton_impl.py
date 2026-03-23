@@ -69,27 +69,30 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                      centroid_sums, centroid_cnts, cached_config, use_atomic,
                      update_block_n, sort_vals_buf, sort_idx_buf,
                      hist_buf, offsets_buf, max_iters,
-                     d_sub=0, x_sq_sub=None, c_sq_sub=None, cached_config_sub=None):
+                     d_sub=0, x_proj=None, x_sq_proj=None, c_proj=None,
+                     c_sq_proj=None, proj_mat=None, cached_config_sub=None):
     """Run the Euclidean k-means loop with explicit ping-pong centroid buffers.
 
-    When d_sub > 0: uses partial-D assignment for iterations 0..max_iters-2 (cheaper),
-    then full-D assignment for the last iteration (exact). Centroid update always uses full D.
+    When d_sub > 0: uses random-projected D_sub-dim assignment for iterations
+    0..max_iters-2 (cheaper), then full-D for the last iteration (exact).
+    Centroid update always uses full D.
     """
     import triton
     B, N, D = x.shape
     K = centroids_src.shape[1]
     SORT_BN = 256
     sort_grid = (triton.cdiv(N, SORT_BN), B)
-    use_partial = d_sub > 0 and d_sub < D and max_iters > 1
+    use_proj = d_sub > 0 and d_sub < D and max_iters > 1
     buf = [centroids_src, centroids_dst]
     for it in range(max_iters):
         src = buf[it % 2]
         dst = buf[(it + 1) % 2]
-        if use_partial and it < max_iters - 1:
-            # Partial-D assignment (50% fewer FLOPs, approximate but within tolerance)
-            compute_sq_norms(src[:, :, :d_sub], out=c_sq_sub)
-            cluster_ids = euclid_assign_triton(x[:, :, :d_sub], src[:, :, :d_sub],
-                                               x_sq_sub, out=out, c_sq=c_sq_sub,
+        if use_proj and it < max_iters - 1:
+            # Random-projected assignment (50% fewer FLOPs, approximate)
+            torch.matmul(src, proj_mat, out=c_proj)
+            compute_sq_norms(c_proj, out=c_sq_proj)
+            cluster_ids = euclid_assign_triton(x_proj, c_proj,
+                                               x_sq_proj, out=out, c_sq=c_sq_proj,
                                                config=cached_config_sub, use_heuristic=False)
         else:
             # Full-D assignment (exact, used for last iteration)
@@ -192,11 +195,14 @@ def batch_kmeans_Euclid(
 
             cached_config = _heuristic_euclid_config(N, K, D, device=x.device)
 
-            # Partial-D buffers for approximate assignment
-            x_sq_sub = c_sq_sub = cached_config_sub = None
+            # Random projection buffers for approximate assignment
+            x_proj = x_sq_proj = c_proj = c_sq_proj = proj_mat = cached_config_sub = None
             if d_sub > 0:
-                x_sq_sub = compute_sq_norms(x[:, :, :d_sub])
-                c_sq_sub = torch.empty((B, K), device=x.device, dtype=x.dtype)
+                proj_mat = torch.randn(D, d_sub, device=x.device, dtype=x.dtype) * (1.0 / (D ** 0.5))
+                x_proj = torch.matmul(x, proj_mat)  # (B, N, d_sub) — static, x never changes
+                x_sq_proj = compute_sq_norms(x_proj)
+                c_proj = torch.empty((B, K, d_sub), device=x.device, dtype=x.dtype)
+                c_sq_proj = torch.empty((B, K), device=x.device, dtype=x.dtype)
                 cached_config_sub = _heuristic_euclid_config(N, K, d_sub, device=x.device)
 
             if not use_atomic:
@@ -222,8 +228,9 @@ def batch_kmeans_Euclid(
                     entry.sort_vals_buf, entry.sort_idx_buf,
                     entry.hist_buf, entry.offsets_buf,
                     max_iters,
-                    d_sub=d_sub, x_sq_sub=x_sq_sub,
-                    c_sq_sub=c_sq_sub, cached_config_sub=cached_config_sub,
+                    d_sub=d_sub, x_proj=x_proj, x_sq_proj=x_sq_proj,
+                    c_proj=c_proj, c_sq_proj=c_sq_proj,
+                    proj_mat=proj_mat, cached_config_sub=cached_config_sub,
                 )
             entry.graph = g
             entry.final_centroids = final_buf
@@ -263,12 +270,15 @@ def batch_kmeans_Euclid(
     # First c_sq computation
     compute_sq_norms(centroids, out=c_sq)
 
-    # Partial-D for warmup path (must match graph path for JIT warmup)
+    # Random projection for warmup path (must match graph path for JIT warmup)
     d_sub = 64 if (D == 128 and n_clusters >= 256) else (128 if D == 256 else 0)
-    x_sq_sub = c_sq_sub = cached_config_sub = None
+    x_proj = x_sq_proj = c_proj = c_sq_proj = proj_mat = cached_config_sub = None
     if d_sub > 0:
-        x_sq_sub = compute_sq_norms(x[:, :, :d_sub])
-        c_sq_sub = torch.empty((B, n_clusters), device=x.device, dtype=x.dtype)
+        proj_mat = torch.randn(D, d_sub, device=x.device, dtype=x.dtype) * (1.0 / (D ** 0.5))
+        x_proj = torch.matmul(x, proj_mat)
+        x_sq_proj = compute_sq_norms(x_proj)
+        c_proj = torch.empty((B, n_clusters, d_sub), device=x.device, dtype=x.dtype)
+        c_sq_proj = torch.empty((B, n_clusters), device=x.device, dtype=x.dtype)
         cached_config_sub = _heuristic_euclid_config(N, n_clusters, d_sub, device=x.device) if use_heuristic else None
 
     import triton as _triton
@@ -277,9 +287,10 @@ def batch_kmeans_Euclid(
 
     for it in range(max_iters):
         if d_sub > 0 and it < max_iters - 1:
-            compute_sq_norms(centroids[:, :, :d_sub], out=c_sq_sub)
-            cluster_ids = euclid_assign_triton(x[:, :, :d_sub], centroids[:, :, :d_sub],
-                                               x_sq_sub, out=out, c_sq=c_sq_sub,
+            torch.matmul(centroids, proj_mat, out=c_proj)
+            compute_sq_norms(c_proj, out=c_sq_proj)
+            cluster_ids = euclid_assign_triton(x_proj, c_proj,
+                                               x_sq_proj, out=out, c_sq=c_sq_proj,
                                                config=cached_config_sub, use_heuristic=False)
         else:
             cluster_ids = euclid_assign_triton(x, centroids, x_sq, out=out, c_sq=c_sq,
