@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from torch.cuda import nvtx
 from flash_kmeans.assign_euclid_triton import euclid_assign_triton, cosine_assign_triton, _heuristic_euclid_config, compute_sq_norms
-from flash_kmeans.centroid_update_triton import triton_centroid_update_cosine, triton_centroid_update_euclid, triton_centroid_update_sorted_euclid, triton_centroid_update_sorted_cosine, torch_centroid_update_euclid
+from flash_kmeans.centroid_update_triton import triton_centroid_update_cosine, triton_centroid_update_euclid, triton_centroid_update_sorted_euclid, triton_centroid_update_sorted_cosine, torch_centroid_update_euclid, _histogram_kernel
 from tqdm import trange
 
 # -------------------- Compiled single-iteration kernels --------------------
@@ -70,14 +70,20 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
                      update_block_n, sort_vals_buf, sort_idx_buf,
                      hist_buf, offsets_buf, max_iters):
     """Run the Euclidean k-means loop with explicit ping-pong centroid buffers."""
+    import triton
+    B, N, D = x.shape
+    K = centroids_src.shape[1]
+    SORT_BN = 256
+    sort_grid = (triton.cdiv(N, SORT_BN), B)
     buf = [centroids_src, centroids_dst]
     for it in range(max_iters):
         src = buf[it % 2]
         dst = buf[(it + 1) % 2]
-        # Fused assign + histogram: hist_buf zeroed by previous finalize kernel (or pre-zeroed on first iter)
+        # Non-fused assignment (no atomic hist overhead in assign kernel)
         cluster_ids = euclid_assign_triton(x, src, x_sq, out=out, c_sq=c_sq,
-                                           config=cached_config, use_heuristic=False,
-                                           hist_buf=hist_buf)
+                                           config=cached_config, use_heuristic=False)
+        # Separate histogram kernel (hist_buf zeroed by previous finalize or pre-zeroed)
+        _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=K, BLOCK_N=SORT_BN, num_warps=2)
         if use_atomic:
             triton_centroid_update_euclid(x, cluster_ids, src,
                                           centroid_sums=centroid_sums,
@@ -232,11 +238,16 @@ def batch_kmeans_Euclid(
     # First c_sq computation
     compute_sq_norms(centroids, out=c_sq)
 
+    import triton as _triton
+    SORT_BN = 256
+    sort_grid = (_triton.cdiv(N, SORT_BN), B)
+
     for it in range(max_iters):
-        # Use fused assign+histogram to warm up the hist kernel for graph capture
+        # Non-fused assignment (consistent with graph path, warm up non-fused kernel)
         cluster_ids = euclid_assign_triton(x, centroids, x_sq, out=out, c_sq=c_sq,
-                                           config=cached_config, use_heuristic=False,
-                                           hist_buf=hist_buf)
+                                           config=cached_config, use_heuristic=False)
+        # Separate histogram kernel (hist_buf zeroed by previous finalize or pre-zeroed)
+        _histogram_kernel[sort_grid](cluster_ids, hist_buf, N=N, K=n_clusters, BLOCK_N=SORT_BN, num_warps=2)
         # Centroid update + fused c_sq for next iteration
         if use_atomic:
             centroids_new = triton_centroid_update_euclid(x, cluster_ids, centroids,
