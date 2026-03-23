@@ -88,8 +88,8 @@ def _run_euclid_loop(x, x_sq, centroids_src, centroids_dst, out, c_sq,
         src = buf[it % 2]
         dst = buf[(it + 1) % 2]
         if use_proj and it < max_iters - 1:
-            # Random-projected assignment (50% fewer FLOPs, approximate)
-            torch.matmul(src, proj_mat, out=c_proj)
+            # Random-dim assignment (50% fewer FLOPs, approximate)
+            torch.index_select(src, 2, proj_mat, out=c_proj)
             compute_sq_norms(c_proj, out=c_sq_proj)
             cluster_ids = euclid_assign_triton(x_proj, c_proj,
                                                x_sq_proj, out=out, c_sq=c_sq_proj,
@@ -195,15 +195,16 @@ def batch_kmeans_Euclid(
 
             cached_config = _heuristic_euclid_config(N, K, D, device=x.device)
 
-            # Random projection buffers for approximate assignment
+            # Random dim selection for approximate assignment
             x_proj = x_sq_proj = c_proj = c_sq_proj = proj_mat = cached_config_sub = None
             if d_sub > 0:
-                proj_mat = torch.randn(D, d_sub, device=x.device, dtype=x.dtype) * (1.0 / (D ** 0.5))
-                x_proj = torch.matmul(x, proj_mat)  # (B, N, d_sub) — static, x never changes
+                perm = torch.randperm(D, device=x.device)[:d_sub].sort().values
+                x_proj = x[:, :, perm].contiguous()  # (B, N, d_sub) — static
                 x_sq_proj = compute_sq_norms(x_proj)
                 c_proj = torch.empty((B, K, d_sub), device=x.device, dtype=x.dtype)
                 c_sq_proj = torch.empty((B, K), device=x.device, dtype=x.dtype)
                 cached_config_sub = _heuristic_euclid_config(N, K, d_sub, device=x.device)
+                proj_mat = perm  # store perm indices for centroid projection
 
             if not use_atomic:
                 entry.sort_vals_buf = torch.empty((B, N), device=x.device, dtype=torch.int16)
@@ -270,12 +271,12 @@ def batch_kmeans_Euclid(
     # First c_sq computation
     compute_sq_norms(centroids, out=c_sq)
 
-    # Random projection for warmup path (must match graph path for JIT warmup)
+    # Random dim selection for warmup path (must match graph path for JIT warmup)
     d_sub = 64 if (D == 128 and n_clusters >= 256) else (128 if D == 256 else 0)
-    x_proj = x_sq_proj = c_proj = c_sq_proj = proj_mat = cached_config_sub = None
+    x_proj = x_sq_proj = c_proj = c_sq_proj = perm = cached_config_sub = None
     if d_sub > 0:
-        proj_mat = torch.randn(D, d_sub, device=x.device, dtype=x.dtype) * (1.0 / (D ** 0.5))
-        x_proj = torch.matmul(x, proj_mat)
+        perm = torch.randperm(D, device=x.device)[:d_sub].sort().values
+        x_proj = x[:, :, perm].contiguous()
         x_sq_proj = compute_sq_norms(x_proj)
         c_proj = torch.empty((B, n_clusters, d_sub), device=x.device, dtype=x.dtype)
         c_sq_proj = torch.empty((B, n_clusters), device=x.device, dtype=x.dtype)
@@ -287,7 +288,7 @@ def batch_kmeans_Euclid(
 
     for it in range(max_iters):
         if d_sub > 0 and it < max_iters - 1:
-            torch.matmul(centroids, proj_mat, out=c_proj)
+            torch.index_select(centroids, 2, perm, out=c_proj)
             compute_sq_norms(c_proj, out=c_sq_proj)
             cluster_ids = euclid_assign_triton(x_proj, c_proj,
                                                x_sq_proj, out=out, c_sq=c_sq_proj,
