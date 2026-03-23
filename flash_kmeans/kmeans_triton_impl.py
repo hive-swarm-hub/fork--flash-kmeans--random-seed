@@ -181,7 +181,7 @@ def batch_kmeans_Euclid(
             if D == 128 and K >= 4096:
                 dim_schedule = [32]*5 + [64]*4 + [128]
             elif D == 128 and K >= 256:
-                dim_schedule = [64]*9 + [128]
+                dim_schedule = [32]*5 + [64]*4 + [128]
             elif D == 256:
                 dim_schedule = [64]*7 + [128]*2 + [256]
             else:
