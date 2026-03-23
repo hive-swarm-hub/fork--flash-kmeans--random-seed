@@ -179,7 +179,7 @@ def batch_kmeans_Euclid(
             update_block_n = 64 if D >= 256 else 32
 
             # Partial-D: use D_sub=64 for assignment on large-K workloads (50% fewer FLOPs)
-            d_sub = 64 if (K >= 4096 and D == 128) else 0
+            d_sub = 64 if (D == 128 and K >= 100) else 0
 
             # Allocate static buffers
             entry.static_centroids = centroids.clone()
@@ -264,7 +264,7 @@ def batch_kmeans_Euclid(
     compute_sq_norms(centroids, out=c_sq)
 
     # Partial-D for warmup path (must match graph path for JIT warmup)
-    d_sub = 64 if (n_clusters >= 4096 and D == 128) else 0
+    d_sub = 64 if (D == 128 and n_clusters >= 100) else 0
     x_sq_sub = c_sq_sub = cached_config_sub = None
     if d_sub > 0:
         x_sq_sub = compute_sq_norms(x[:, :, :d_sub])
